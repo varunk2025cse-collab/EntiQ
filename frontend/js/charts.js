@@ -209,58 +209,6 @@ function drawPaired(labels, a, b, { names = ["A", "B"], format = fmt.int, height
   return svg;
 }
 
-/** Multi-series line chart with crosshair (x numeric). series: [{name, values, color}]; marker: x to highlight. */
-export function lineChart(xs, series, opts = {}) { return responsive((W) => drawLines(xs, series, opts, W)); }
-function drawLines(xs, series, { height = 240, yFormat = (v) => v.toFixed(2), xFormat = (v) => v.toFixed(2), marker, markerLabel, yDomain } = {}, W) {
-  const H = height, L = 44, R = 70, T = 12, B = 28;
-  const all = series.flatMap((s0) => s0.values).filter((v) => v !== null && v !== undefined);
-  let [lo, hi] = yDomain || [Math.min(...all), Math.max(...all)];
-  if (!yDomain) { const pad = Math.max((hi - lo) * 0.08, 0.005); lo = Math.max(0, lo - pad); hi = Math.min(1, hi + pad); }
-  const x = (v) => L + (W - L - R) * ((v - xs[0]) / ((xs[xs.length - 1] - xs[0]) || 1));
-  const y = (v) => T + (H - T - B) * (1 - (v - lo) / ((hi - lo) || 1));
-  const svg = s("svg", { viewBox: `0 0 ${W} ${H}`, role: "img" });
-  for (let k = 0; k <= 4; k++) {
-    const v = lo + (hi - lo) * k / 4;
-    svg.append(s("line", { x1: L, x2: W - R, y1: y(v), y2: y(v), class: "gridline" }),
-      s("text", { x: L - 8, y: y(v) + 4, "text-anchor": "end", class: "axis-label" }, yFormat(v)));
-  }
-  const ticks = W < 480 ? 4 : 8;
-  for (let k = 0; k <= ticks; k++) {
-    const v = xs[0] + (xs[xs.length - 1] - xs[0]) * k / ticks;
-    svg.append(s("text", { x: x(v), y: H - 8, "text-anchor": "middle", class: "axis-label" }, xFormat(v)));
-  }
-  if (marker !== undefined && marker !== null) {
-    svg.append(s("line", { x1: x(marker), x2: x(marker), y1: T, y2: H - B, stroke: "var(--text-muted)", "stroke-dasharray": "4 4" }),
-      s("text", { x: x(marker) + 6, y: T + 10, class: "val-label" }, markerLabel || xFormat(marker)));
-  }
-  series.forEach((sr) => {
-    const d = sr.values.map((v, i) => `${i ? "L" : "M"}${x(xs[i]).toFixed(1)},${y(v).toFixed(1)}`).join("");
-    svg.append(s("path", { d, fill: "none", stroke: sr.color, "stroke-width": 2, "stroke-linejoin": "round" }));
-    const lv = sr.values[sr.values.length - 1];
-    svg.append(s("text", { x: W - R + 6, y: y(lv) + 4, class: "val-label" }, sr.name));
-  });
-  const hair = s("line", { x1: 0, x2: 0, y1: T, y2: H - B, stroke: "var(--axis)", visibility: "hidden" });
-  const dots = series.map((sr) => s("circle", { r: 4, fill: sr.color, stroke: "#fff", "stroke-width": 2, visibility: "hidden" }));
-  svg.append(hair, ...dots);
-  const hit = s("rect", { x: L, y: T, width: W - L - R, height: H - T - B, fill: "transparent" });
-  hit.addEventListener("pointermove", (ev) => {
-    const r = svg.getBoundingClientRect();
-    const px = (ev.clientX - r.left) * (W / r.width);
-    let i = 0, best = Infinity;
-    xs.forEach((v, k) => { const d = Math.abs(x(v) - px); if (d < best) { best = d; i = k; } });
-    hair.setAttribute("x1", x(xs[i])); hair.setAttribute("x2", x(xs[i])); hair.setAttribute("visibility", "visible");
-    dots.forEach((dt, k) => { dt.setAttribute("cx", x(xs[i])); dt.setAttribute("cy", y(series[k].values[i])); dt.setAttribute("visibility", "visible"); });
-    const t = tip();
-    clear(t).append(h("span", {}, `threshold ${xFormat(xs[i])}`), ...series.map((sr) => h("div", { style: "display:flex;gap:8px;align-items:center;justify-content:space-between" },
-      h("span", {}, h("i", { style: { display: "inline-block", width: "12px", height: "2px", background: sr.color, marginRight: "6px", verticalAlign: "middle" } }), sr.name),
-      h("b", { style: "font-size:13px" }, yFormat(sr.values[i])))));
-    t.style.left = `${Math.min(ev.clientX + 14, window.innerWidth - 220)}px`; t.style.top = `${ev.clientY + 14}px`; t.classList.add("on");
-  });
-  hit.addEventListener("pointerleave", () => { hair.setAttribute("visibility", "hidden"); dots.forEach((d) => d.setAttribute("visibility", "hidden")); hideTip(); });
-  svg.append(hit);
-  return svg;
-}
-
 export function legend(items) {
   return h("div", { class: "legend" }, items.map(([label, color]) => h("span", {}, h("i", { style: { background: color } }), label)));
 }

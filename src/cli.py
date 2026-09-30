@@ -14,12 +14,14 @@ Global options: --config PATH, --set key.path=value (repeatable), --dataset-dir 
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import sys
 import time
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from .utils.config import PROJECT_ROOT, load_config, parse_override, resolve_path, save_selection
@@ -278,6 +280,84 @@ def cmd_predict(args, cfg) -> dict:
     return summary
 
 
+def cmd_predict_sharded(args, cfg) -> dict:
+    """Full-scale test resolution over geographic shards (scripts/shard_dataset.py must have run)."""
+    import shutil
+
+    from .data.data_loader import read_tsv  # noqa: F401  (tab-separated contract)
+    from .inference.predictor import next_run_id
+    from .inference.sharded import build_entities, merge_shards, read_ids, resolve_sharded
+    from .inference.validator_runner import run_official, validate_submission
+    from .matching.decision_engine import DecisionParams
+    from .models.registry import ModelRegistry
+    from .utils.timing import peak_rss_mb
+
+    reg = ModelRegistry(resolve_path(cfg, "models_dir"))
+    version = args.version or reg.production()
+    bundle = reg.load(version)
+    runs_dir = resolve_path(cfg, "runs_dir")
+    run_id = args.resume or next_run_id(runs_dir)
+    rdir = runs_dir / run_id
+    rdir.mkdir(parents=True, exist_ok=True)
+    t0 = time.time()
+    shards_root = Path(args.shards)
+    res = resolve_sharded(shards_root, args.split, bundle, cfg, rdir, chunk_s1=args.chunk_s1, keep_top=args.keep_top)
+    test_dir = resolve_path(cfg, "dataset_dir") / args.split
+    s1 = pd.read_csv(test_dir / f"{args.split}_source1.tsv", sep="\t", dtype=str, keep_default_na=False, quoting=csv.QUOTE_NONE)
+    merged = merge_shards(rdir, s1["entity_id"].tolist())
+    out = rdir / "output"
+    out.mkdir(exist_ok=True)
+    for f in ("matching_results.tsv", "candidate_pairs.tsv"):
+        shutil.move(str(rdir / f), out / f)
+    validation = validate_submission(out / "matching_results.tsv", out / "candidate_pairs.tsv", test_dir)
+    official = run_official(resolve_path(cfg, "official_validator"), out / "matching_results.tsv", out / "candidate_pairs.tsv", test_dir)
+    prm = DecisionParams(**bundle["decision"])
+    rich = merged["rich"]
+    rich["s1_code"] = 0
+    rich.to_pickle(rdir / "candidates.pkl")
+    merged["records"].to_pickle(rdir / "records.pkl")
+    ents = build_entities(s1, merged, prm)
+    ents.to_pickle(rdir / "entities.pkl")
+    conf = rich.loc[rich["selected"], "p"].to_numpy()
+    shard_rep = json.loads((shards_root / "shard_report.json").read_text()) if (shards_root / "shard_report.json").exists() else {}
+    n1 = len(s1)
+    pre = sum(s["candidates"] for s in res["shards"])
+    summary = {
+        "run_id": run_id, "created": time.strftime("%Y-%m-%dT%H:%M:%S"), "status": "COMPLETED", "dataset": args.split,
+        "dataset_kind": "competition", "model_version": version, "model_name": bundle["spec"]["name"], "decision": prm.as_dict(),
+        "mode": "sharded", "candidates_stored": f"top-{args.keep_top} per entity + all accepted links (submission files contain every scored pair)",
+        "counts": {"s1": n1, "s2": int(sum(s["s2"] for s in res["shards"])), "s3": int(sum(s["s3"] for s in res["shards"])),
+                   "candidates": merged["candidates"], "links": merged["links"], "s2_links": merged["s2_links"], "s3_links": merged["s3_links"],
+                   "matched_entities": merged["matched_entities"], "singletons": n1 - merged["matched_entities"],
+                   "high_confidence_links": int((conf >= 0.9).sum()), "review_links": 0},
+        "blocking": {"union": {"candidates": merged["candidates"], "avg_candidates_per_s1": merged["candidates"] / max(1, n1),
+                               "s1_without_candidates": n1 - merged["s1_with_candidates"], "reduction_ratio": None}, "blockers": {}},
+        "graph": {"s1_with_multiple_links": int((ents["n_matches"] > 1).sum()), "s1_linked_to_both_sources": int(((ents["n_s2"] > 0) & (ents["n_s3"] > 0)).sum())},
+        "confidence_histogram": np.histogram(conf, bins=10, range=(0, 1))[0].tolist(),
+        "country_distribution": ents["country"].value_counts().to_dict(),
+        "country_match_rate": ents.groupby("country")["decision"].apply(lambda d: float((d == "MATCH").mean())).to_dict(),
+        "links_per_entity": ents["n_matches"].clip(upper=5).value_counts().sort_index().to_dict(),
+        "reason_code_counts": pd.Series([c for cs in ents.loc[ents.decision == "MATCH", "reason_codes"] for c in cs]).value_counts().to_dict(),
+        "validation": validation, "official_validation": official, "metrics": None, "metrics_note": None,
+        "sharding": {"routing_recall_train_links": shard_rep.get("routing_recall_train_links"), "shards": res["shards"]},
+        "timings": {"stages": {}, "total_seconds": round(time.time() - t0, 1), "run": {"total_seconds": 0, "peak_rss_mb": round(peak_rss_mb(), 0), "stages": {}}},
+        "files": {"matching": "output/matching_results.tsv", "candidate": "output/candidate_pairs.tsv"},
+    }
+    del pre
+    (rdir / "summary.json").write_text(json.dumps(summary, indent=2, default=str))
+    if validation["status"] == "PASS" and (official is None or official["status"] == "PASS"):
+        dst = resolve_path(cfg, "output_dir")
+        dst.mkdir(parents=True, exist_ok=True)
+        for f in ("matching_results.tsv", "candidate_pairs.tsv"):
+            shutil.copy(out / f, dst / f)
+    print(f"{run_id}: {n1:,} S1 entities, {merged['candidates']:,} candidates, {merged['links']:,} links, "
+          f"{merged['matched_entities']:,} matched; built-in validation {validation['status']}; official {official and official['status']}; "
+          f"{time.time() - t0:.0f}s")
+    if official:
+        print(official["stdout"])
+    return summary
+
+
 def cmd_all(args, cfg) -> None:
     cmd_profile(args, cfg)
     cmd_blocking(args, cfg)
@@ -333,6 +413,13 @@ def main(argv=None) -> None:
     pr = sub.add_parser("predict")
     pr.add_argument("--split", default="test")
     pr.add_argument("--version")
+    ps = sub.add_parser("predict-sharded", help="full-scale resolution over geographic shards")
+    ps.add_argument("--split", default="test")
+    ps.add_argument("--version")
+    ps.add_argument("--shards", default=str(PROJECT_ROOT / "data" / "shards"))
+    ps.add_argument("--chunk-s1", type=int, default=40_000)
+    ps.add_argument("--keep-top", type=int, default=3)
+    ps.add_argument("--resume", help="existing RUN id to resume (finished shards are skipped)")
     s = sub.add_parser("synth")
     s.add_argument("--out", default=str(PROJECT_ROOT / "data" / "synthetic"))
     s.add_argument("--n-train", type=int, default=3000)
@@ -344,7 +431,8 @@ def main(argv=None) -> None:
     cfg = _cfg(args)
     setup_logging(args.log_level, resolve_path(cfg, "experiments_dir") / "logs" / f"{time.strftime('%Y%m%d')}.jsonl")
     {"profile": cmd_profile, "blocking": cmd_blocking, "experiment": cmd_experiment, "train": cmd_train,
-     "predict": cmd_predict, "all": cmd_all, "synth": cmd_synth, "tune": cmd_tune}[args.cmd](args, cfg)
+     "predict": cmd_predict, "all": cmd_all, "synth": cmd_synth, "tune": cmd_tune,
+     "predict-sharded": cmd_predict_sharded}[args.cmd](args, cfg)
 
 
 if __name__ == "__main__":

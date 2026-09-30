@@ -31,6 +31,13 @@ def start_run(dataset_id: str, split: str, model_version: str | None) -> str:
         raise KeyError(f"dataset {dataset_id} not found")
     if split not in (ds_row.splits or []):
         raise ValueError(f"dataset {dataset_id} has no '{split}' split")
+    from pathlib import Path
+
+    from .datasets import file_info
+
+    rows = sum(f["rows"] for f in file_info(Path(ds_row.root), [split]).get(split, []))
+    if rows > 1_500_000:  # never run a multi-million-record resolution inside the web server
+        raise ValueError(f"{rows:,} records is too large for an in-app run; use `python -m src.cli predict-sharded`")
     reg = registry()
     version = model_version or reg.production()
     if version is None:
@@ -119,7 +126,14 @@ def _execute_training(job_id: str, model: str | None, promote: bool) -> None:
     try:
         cfg = settings.cfg
         upd(status="RUNNING", stage="preparing training data")
-        ds = load_split(resolve_path(cfg, "dataset_dir"), "train")
+        from .datasets import file_info
+
+        root = resolve_path(cfg, "dataset_dir")
+        rows = sum(f["rows"] for f in file_info(root, ["train"]).get("train", []))
+        if rows > 1_500_000:
+            raise RuntimeError(f"{rows:,} training rows exceed single-pass memory; train on a real subset with "
+                               "`python scripts/real_subset.py` + `python -m src.cli --dataset-dir data/real_subset all`")
+        ds = load_split(root, "train")
         prep = prepare(ds, cfg)
         name = model or cfg["model"]["primary"]
         upd(stage=f"cross-validating and fitting {name}")

@@ -96,7 +96,7 @@ export function brandMark() {
   // Two interlocking rings = two records resolving into one identity.
   const el = s("svg", { viewBox: "0 0 40 40", class: "brand-mark", "aria-hidden": "true" });
   const g = s("defs", {}, s("linearGradient", { id: "bm", x1: "0", y1: "0", x2: "1", y2: "1" },
-    s("stop", { offset: "0", "stop-color": "#4f46e5" }), s("stop", { offset: "1", "stop-color": "#6366f1" })));
+    s("stop", { offset: "0", "stop-color": "#4f8cff" }), s("stop", { offset: "1", "stop-color": "#8b5cf6" })));
   el.append(g,
     s("rect", { x: "1", y: "1", width: "38", height: "38", rx: "11", fill: "url(#bm)" }),
     s("circle", { cx: "16", cy: "20", r: "7.5", fill: "none", stroke: "#fff", "stroke-width": "2.6" }),
@@ -116,10 +116,9 @@ export const fmt = {
 
 export function badge(decision) {
   if (decision === "MATCH") return h("span", { class: "badge match" }, icon("check"), "Match");
-  if (decision === "NO_MATCH" || decision === "NO MATCH") return h("span", { class: "badge nomatch" }, icon("x"), "No match");
+  if (decision === "NO_MATCH" || decision === "NO MATCH") return h("span", { class: "badge nomatch" }, icon("x"), "Singleton");
   if (decision === "REVIEW") return h("span", { class: "badge review" }, icon("alert"), "Review");
-  if (decision === "REJECTED") return h("span", { class: "badge nomatch" }, icon("x"), "No match");
-  if (decision === "CANDIDATE") return h("span", { class: "badge cand" }, icon("nodes"), "Candidate");
+  if (decision === "REJECTED") return h("span", { class: "badge nomatch" }, icon("x"), "Rejected");
   return h("span", { class: "badge nomatch" }, decision);
 }
 
@@ -136,6 +135,6 @@ export function toast(msg, err = false) {
   setTimeout(() => t.remove(), 4500);
 }
 
-export function empty(title, text, code, ic = "info") {
-  return h("div", { class: "empty" }, h("div", { class: "ic" }, icon(ic)), h("h3", {}, title), text ? h("p", {}, text) : null, code ? h("pre", {}, code) : null);
+export function empty(title, text, code) {
+  return h("div", { class: "empty" }, icon("info"), h("h3", {}, title), h("p", {}, text), code ? h("pre", {}, code) : null);
 }

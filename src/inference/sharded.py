@@ -24,7 +24,7 @@ from ..matching.decision_engine import DecisionParams, select_pairs
 from ..utils.logging import get_logger
 from ..utils.timing import peak_rss_mb
 from .pipeline import prepare
-from .predictor import STORED_FEATURES, score_pairs
+from .predictor import RECORD_COLUMNS, STORED_FEATURES, score_pairs
 
 log = get_logger("sharded")
 
@@ -72,13 +72,17 @@ def resolve_sharded(shards_root: str | Path, split: str, bundle: dict, cfg: dict
             df["rank_s1"] = df.groupby("s1_id")["p"].rank(ascending=False, method="first").astype(np.int32)
             n_cand += len(df)
             # keep: every scored pair's ids (candidate file) + full rows for top-k and selected (UI / merge)
-            pieces.append((df[["s1_id", "other_id", "target", "p", "selected"]],
-                           df[(df["rank_s1"] <= keep_top) | df["selected"]]))
+            rich_df = df[(df["rank_s1"] <= keep_top) | df["selected"]]
+            keep_ids = set(s1c["entity_id"]) | set(rich_df["other_id"])
+            recs = prep.store.records
+            recs = recs.loc[recs["entity_id"].isin(keep_ids), RECORD_COLUMNS]
+            pieces.append((df[["s1_id", "other_id", "target", "p", "selected"]], rich_df, recs))
             del prep, c, p, p_raw, votes, df, feats
             gc.collect()
         slim = pd.concat([x[0] for x in pieces], ignore_index=True)
         rich = pd.concat([x[1] for x in pieces], ignore_index=True)
-        pd.to_pickle({"slim": slim, "rich": rich, "s1_ids": s1["entity_id"].tolist()}, part)
+        records = pd.concat([x[2] for x in pieces], ignore_index=True).drop_duplicates("entity_id")
+        pd.to_pickle({"slim": slim, "rich": rich, "records": records, "s1_ids": s1["entity_id"].tolist()}, part)
         st = {"shard": sd.name, "s1": len(s1), "s2": len(ds_full.s2), "s3": len(ds_full.s3), "chunks": len(chunks),
               "candidates": n_cand, "links": int(slim["selected"].sum()), "seconds": round(time.perf_counter() - t_sh, 1),
               "peak_rss_mb": round(peak_rss_mb(), 0)}
@@ -113,8 +117,56 @@ def merge_shards(out_dir: str | Path, s1_all: list[str], exclusive: bool = True)
     rich = rich.sort_values("p", ascending=False).drop_duplicates(["s1_id", "other_id"])
     kept = set(zip(sel["s1_id"], sel["other_id"]))
     rich["selected"] = [(a, b) in kept for a, b in zip(rich["s1_id"], rich["other_id"])]
+    records = pd.concat([pd.read_pickle(p)["records"] for p in parts], ignore_index=True).drop_duplicates("entity_id")
+    n_cand = slim.groupby("s1_id").size()
     return {"s1": len(s1_all), "s1_with_candidates": len(cand_lists), "links": int(len(sel)),
-            "candidates": int(len(slim)), "matched_entities": len(match_lists), "rich": rich}
+            "s2_links": int((sel["target"] == "S2").sum()), "s3_links": int((sel["target"] == "S3").sum()),
+            "candidates": int(len(slim)), "matched_entities": len(match_lists), "rich": rich, "records": records,
+            "n_candidates": n_cand}
+
+
+def build_entities(s1: pd.DataFrame, merged: dict, prm) -> pd.DataFrame:
+    """Per-S1 table for the UI (every S1 entity, including those without candidates)."""
+    from ..matching.decision_engine import REASON_RULES
+
+    rich = merged["rich"]
+    ordered = rich.sort_values(["s1_id", "p"], ascending=[True, False])
+    pos = ordered.groupby("s1_id").cumcount()
+    best = ordered[pos == 0].set_index("s1_id")["p"]
+    second = ordered[pos == 1].set_index("s1_id")["p"]
+    sel = rich[rich["selected"]]
+    n_s2 = sel[sel["target"] == "S2"].groupby("s1_id").size()
+    n_s3 = sel[sel["target"] == "S3"].groupby("s1_id").size()
+    minsel = sel.groupby("s1_id")["p"].min()
+    ents = s1[["entity_id", "business_name", "business_address", "country"]].rename(columns={"entity_id": "s1_id"}).copy()
+    ids = ents["s1_id"]
+    ents["n_s2"] = ids.map(n_s2).fillna(0).astype(int).values
+    ents["n_s3"] = ids.map(n_s3).fillna(0).astype(int).values
+    ents["n_matches"] = ents["n_s2"] + ents["n_s3"]
+    ents["best"] = ids.map(best).fillna(0.0).values
+    ents["second"] = ids.map(second).fillna(0.0).values
+    ents["gap"] = ents["best"] - ents["second"]
+    ents["n_candidates"] = ids.map(merged["n_candidates"]).fillna(0).astype(int).values
+    ents["n_strong"] = ids.map(rich[rich["p"] >= 0.75].groupby("s1_id").size()).fillna(0).astype(int).values
+    ents["decision"] = np.where(ents["n_matches"] > 0, "MATCH", "NO_MATCH")
+    ents["confidence"] = np.where(ents["n_matches"] > 0, ids.map(minsel).fillna(0).values, 1 - ents["best"]).round(4)
+    top = sel.sort_values("p", ascending=False).drop_duplicates("s1_id").set_index("s1_id")
+
+    class _R(dict):
+        def get(self, k, d=0):
+            return super().get(k, np.full(len(top), d))
+
+    r = _R({c: top[c].to_numpy() for c in top.columns})
+    flags = {name: np.asarray(rule(r), bool) for name, rule in REASON_RULES}
+    codes = {sid: [n for n, f in flags.items() if f[k]] for k, sid in enumerate(top.index)}
+    reasons = []
+    for sid, dec, nc, b in zip(ents["s1_id"], ents["decision"], ents["n_candidates"], ents["best"]):
+        if dec == "MATCH":
+            reasons.append(codes.get(sid, []))
+        else:
+            reasons.append(["NO_CANDIDATES"] if nc == 0 else ["LOW_CONFIDENCE_SINGLETON"] if b < prm.singleton_threshold else ["AMBIGUOUS_CANDIDATES"])
+    ents["reason_codes"] = reasons
+    return ents.reset_index(drop=True)
 
 
 def read_ids(path: str | Path) -> list[str]:
