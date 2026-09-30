@@ -105,7 +105,7 @@ export async function route() {
     const view = h("div", { style: "display:contents" });
     await mod.render(view, { arg, params });
     if (seq !== routeSeq) return;
-    clear(content).append(...[demoBanner(), view].filter(Boolean));
+    clear(content).append(view);
   } catch (e) {
     if (seq !== routeSeq) return;
     clear(content).append(h("div", { class: "card card-pad" }, h("h3", {}, "Something went wrong"), h("pre", { class: "pre" }, String(e.message || e))));

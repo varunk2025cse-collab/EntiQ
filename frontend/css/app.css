@@ -45,6 +45,8 @@
 }
 
 * { box-sizing: border-box; }
+/* default size for every icon; component rules below override it */
+:where(svg[aria-hidden="true"]) { width: 18px; height: 18px; flex: none; }
 html, body { margin: 0; height: 100%; }
 body {
   background: var(--bg);
@@ -331,6 +333,7 @@ table.t td.r, table.t th.r { text-align: right; }
 .pre { white-space: pre-wrap; font: 12px var(--mono); background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; max-height: 320px; overflow: auto; margin: 0; }
 .filters { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
 .drop { border: 2px dashed var(--border-strong); border-radius: var(--radius); padding: 28px; text-align: center; color: var(--text-secondary); }
+.drop svg { width: 30px; height: 30px; color: var(--text-muted); }
 .drop.over { border-color: var(--accent); background: var(--accent-soft); }
 .hint { font-size: 12px; color: var(--text-muted); }
 .hr { height: 1px; background: var(--border); margin: 6px 0; }
