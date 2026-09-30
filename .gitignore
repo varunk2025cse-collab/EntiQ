@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+# data & generated artifacts (reproducible via the CLI; never commit competition data)
+dataset/
+data/
+runs/
+models/
+output/
+experiments/
+*_submission.zip
+configs/selected.yaml

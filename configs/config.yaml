@@ -1,0 +1,81 @@
+# EntiQ — Business Entity Resolution configuration.
+# Every tunable parameter of the pipeline lives here. CLI flags / API calls may
+# override individual keys (dot-paths) without editing this file.
+
+seed: 42
+
+paths:
+  dataset_dir: dataset            # contains train/ and test/ exactly as shipped (never modified)
+  processed_dir: data/processed   # cached normalised records / features
+  validation_dir: data/validation # fold assignments, holdout ids
+  experiments_dir: experiments
+  models_dir: models
+  runs_dir: runs
+  output_dir: output
+  official_validator: student_resource/utils/validate_submission.py  # used if present
+
+normalization:
+  mode: conservative              # conservative | aggressive  (chosen by experiment)
+  strip_accents: true
+  transliteration_keys: true      # adds phonetic key fields (never replaces originals)
+
+blocking:
+  partition_by_country: true      # top-k retrieval inside country partitions (+ missing-country fallback)
+  chunk_size: 2000
+  blockers:
+    exact_name:        {enabled: true, max_group: 200}
+    acronym:           {enabled: true, max_group: 50}
+    name_word_tfidf:   {enabled: true, k: 15, min_score: 0.2, max_df: 0.05, max_df_abs: 2000}
+    name_char_tfidf:   {enabled: true, k: 20, min_score: 0.3, ngram: [3, 3], max_df: 0.03, max_df_abs: 1500}
+    name_char_global:  {enabled: true, k: 5, min_score: 0.5, ngram: [3, 3], max_df: 0.03, max_df_abs: 1500}
+    address_tfidf:     {enabled: true, k: 10, min_score: 0.3, max_df: 0.02, max_df_abs: 1500}
+    name_address_char: {enabled: true, k: 15, min_score: 0.25, ngram: [3, 3], max_df: 0.02, max_df_abs: 1500}
+    postal_token:      {enabled: true, max_group: 50}
+    semantic_lsa:      {enabled: true, k: 10, min_score: 0.5, dims: 128}
+  # Cascade stage 1: cheap-feature model drops hopeless candidates before the full feature engine.
+  # tau is fitted on out-of-fold scores to keep >= target_recall of blocked true links; the S1's
+  # top `keep_top` candidates per source are always kept. Kept only if the A/B experiment agrees.
+  pruning: {enabled: true, target_recall: 0.999, keep_top: 3}
+
+features:
+  levenshtein_max_len: 48
+  lsa_dims: 128
+  batch_size: 100000
+  n_workers: 4                    # concurrent feature batches (threads; numpy/scipy release the GIL)
+
+model:
+  primary: hgb                    # chosen by experiment: hgb | lr | rf | et | xgb | lgbm | fs | stack
+  cv_folds: 5
+  holdout_fraction: 0.2
+  hard_negative_rounds: 1
+  hard_negative_weight: 3.0
+  hard_negative_min_score: 0.3
+  calibration: isotonic           # none | sigmoid | isotonic
+  params:
+    hgb: {max_iter: 400, learning_rate: 0.06, max_leaf_nodes: 63, min_samples_leaf: 40, l2_regularization: 1.0, early_stopping: true, validation_fraction: 0.1, n_iter_no_change: 30}
+    lr:  {C: 1.0, max_iter: 2000}
+    rf:  {n_estimators: 200, min_samples_leaf: 3, max_features: sqrt, max_samples: 0.5, n_jobs: -1}
+    et:  {n_estimators: 250, min_samples_leaf: 3, max_features: sqrt, n_jobs: -1}
+    xgb: {n_estimators: 600, learning_rate: 0.05, max_depth: 7, subsample: 0.8, colsample_bytree: 0.8, n_jobs: -1}
+    lgbm: {n_estimators: 600, learning_rate: 0.05, num_leaves: 63, subsample: 0.8, colsample_bytree: 0.8, n_jobs: -1, verbose: -1}
+  stack_bases: [hgb, lr, fs]
+  # Feature groups removed from every model; filled by validation A/B tests (e.g. [sibling]).
+  drop_groups: [sibling]
+
+decision:
+  # Starting values only — the tuner overwrites these with validation-optimal ones.
+  mode: threshold                 # threshold | expected_f
+  threshold: 0.5
+  singleton_threshold: 0.5
+  min_gap: 0.0
+  max_per_source: null            # null = unlimited (multi-match allowed)
+  exclusive_assignment: false     # graph layer: each S2/S3 record linked to <=1 S1
+  grid:
+    threshold: [0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9]
+    singleton_delta: [0.0, 0.05, 0.1, 0.15, 0.2]
+    min_gap: [0.0, 0.05, 0.1]
+    max_per_source: [null, 1, 2]
+    exclusive_assignment: [false, true]
+
+runtime:
+  n_jobs: -1
