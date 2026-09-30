@@ -35,7 +35,7 @@ def sync_cli_runs() -> None:
             db.add(ResolutionRun(id=d.name, dataset_id="cli", split=summ.get("dataset", ""),
                                  model_version=summ.get("model_version"), status="COMPLETED", stage="completed",
                                  progress=100, runtime_s=(summ.get("timings", {}).get("run", {}) or {}).get("total_seconds"),
-                                 summary={k: summ.get(k) for k in ("run_id", "dataset", "model_name", "model_version",
+                                 summary={k: summ.get(k) for k in ("run_id", "dataset", "dataset_kind", "model_name", "model_version",
                                                                     "decision", "counts", "metrics", "validation",
                                                                     "timings", "metrics_note")}))
         db.commit()
@@ -47,6 +47,17 @@ def latest_run_id() -> str | None:
         r = db.query(ResolutionRun).filter(ResolutionRun.status == "COMPLETED").order_by(ResolutionRun.created.desc(),
                                                                                          ResolutionRun.id.desc()).first()
         return r.id if r else None
+
+
+def run_dataset_kind(run_id: str | None) -> str | None:
+    """Dataset identity recorded in the run summary ('synthetic' | 'competition' | 'custom' | 'unknown')."""
+    if not run_id:
+        return None
+    p = settings.path("runs_dir") / run_id / "summary.json"
+    try:
+        return json.loads(p.read_text()).get("dataset_kind") or "unknown"
+    except Exception:
+        return "unknown"
 
 
 def run_row(run_id: str) -> dict | None:
@@ -186,7 +197,7 @@ def entity_detail(run_id: str | None, eid: str) -> dict:
     e = a.ents_idx.loc[eid]
     idx = a.by_s1.get(eid, [])
     rows = a.cand.iloc[idx].sort_values("rank_s1")
-    return {"run_id": rid, "kind": "s1", "record": _record(a, eid),
+    return {"run_id": rid, "kind": "s1", "record": _record(a, eid), "decision": a.summary.get("decision"),
             "entity": {k: _clean(v) for k, v in e.to_dict().items()},
             "matches": _cands(a, rows[rows["selected"]]),
             "candidates": _cands(a, rows.head(60)), "n_candidates": int(len(rows)),
@@ -237,13 +248,14 @@ def analytics(run_id: str | None) -> dict:
     rid = resolve_run(run_id)
     a = artifacts(rid)
     s = a.summary
+    s.setdefault("dataset_kind", run_dataset_kind(rid))
     c = a.cand
     sel = c["selected"].to_numpy()
     hist_bins = np.linspace(0, 1, 11)
     conf_hist = np.histogram(c.loc[sel, "p"], bins=hist_bins)[0].tolist()
     top = c[c["rank_s1"] == 1]
     out = {
-        "run_id": rid, "summary": {k: s.get(k) for k in ("counts", "decision", "model_name", "model_version", "dataset",
+        "run_id": rid, "summary": {k: s.get(k) for k in ("counts", "decision", "model_name", "model_version", "dataset", "dataset_kind", "created",
                                                          "metrics", "metrics_note", "graph", "validation")},
         "confidence_histogram": {"bins": [f"{hist_bins[k]:.1f}-{hist_bins[k + 1]:.1f}" for k in range(10)], "counts": conf_hist},
         "best_score_histogram": np.histogram(top["p"], bins=hist_bins)[0].tolist(),

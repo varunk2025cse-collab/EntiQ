@@ -18,6 +18,62 @@ from ..database.db import Dataset, SessionLocal
 FILE_RE = re.compile(r"^(train|test)_(source1|source2|source3|ground_truth)\.tsv$")
 
 
+def _count_rows(path: Path) -> int:
+    """Data rows (excluding header) by streaming newlines — O(1) memory for multi-GB files."""
+    n = 0
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(1 << 22), b""):
+            n += block.count(b"\n")
+    with open(path, "rb") as fh:  # last line without trailing newline
+        fh.seek(0, 2)
+        if fh.tell():
+            fh.seek(-1, 2)
+            n += fh.read(1) != b"\n"
+    return max(0, n - 1)
+
+
+def file_info(root: Path, splits: list[str]) -> dict:
+    """Per-file name / bytes / rows / header, cached by (path, size, mtime)."""
+    import json
+
+    cache_path = settings.path("processed_dir") / "file_stats_cache.json"
+    try:
+        cache = json.loads(cache_path.read_text())
+    except Exception:
+        cache = {}
+    out = {}
+    for sp in splits:
+        rows = []
+        for name in (f"{sp}_source1.tsv", f"{sp}_source2.tsv", f"{sp}_source3.tsv", f"{sp}_ground_truth.tsv"):
+            p = Path(root) / sp / name
+            if not p.exists():
+                continue
+            st = p.stat()
+            key = f"{p.resolve()}|{st.st_size}|{int(st.st_mtime)}"
+            if key not in cache:
+                with open(p, encoding="utf-8", errors="replace") as fh:
+                    header = fh.readline().rstrip("\r\n").split("\t")
+                cache[key] = {"rows": _count_rows(p), "columns": header}
+            rows.append({"file": name, "bytes": st.st_size, **cache[key]})
+        out[sp] = rows
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps(cache))
+    except Exception:
+        pass
+    return out
+
+
+def dataset_kind_of(root: Path, kind_hint: str) -> str:
+    from src.data.data_loader import SYNTHETIC_MARKER
+
+    if (Path(root) / SYNTHETIC_MARKER).exists():
+        return "synthetic"
+    if Path(root).resolve() == settings.path("dataset_dir").resolve():
+        return "competition"
+    return "custom" if kind_hint != "synthetic" else "synthetic"
+
+
 def _splits(root: Path) -> list[str]:
     return [s for s in ("train", "test") if (root / s / f"{s}_source1.tsv").exists()]
 
@@ -56,8 +112,10 @@ def _dto(r: Dataset) -> dict:
     if r.profile:
         for split, p in r.profile.items():
             counts[split] = {k: v["records"] for k, v in p["profile"]["sources"].items()}
-    return {"id": r.id, "name": r.name, "kind": r.kind, "splits": r.splits, "created": r.created.isoformat() if r.created else None,
-            "description": r.description, "profiled": bool(r.profile), "record_counts": counts}
+    return {"id": r.id, "name": r.name, "kind": r.kind, "data_kind": dataset_kind_of(Path(r.root), r.kind), "splits": r.splits,
+            "created": r.created.isoformat() if r.created else None, "description": r.description,
+            "profiled": bool(r.profile), "record_counts": counts, "has_labels": "train" in (r.splits or []),
+            "files": file_info(Path(r.root), r.splits or [])}
 
 
 def profile(did: str, refresh: bool = False) -> dict:
@@ -67,6 +125,17 @@ def profile(did: str, refresh: bool = False) -> dict:
             raise KeyError(did)
         if r.profile and not refresh:
             return r.profile
+        total = sum(f["rows"] for fs in file_info(Path(r.root), r.splits or []).values() for f in fs)
+        if total > 1_500_000:
+            # multi-million-row datasets are profiled by the CLI (streamed, cached), never inside a web request
+            import json
+
+            cli = settings.path("experiments_dir") / "data_profile.json"
+            if cli.exists():
+                r.profile = json.loads(cli.read_text())
+                db.commit()
+                return r.profile
+            raise ValueError(f"{total:,} rows: run `python -m src.cli profile` once to profile this dataset")
         out = {}
         for split in r.splits:
             ds = load_split(r.root, split)

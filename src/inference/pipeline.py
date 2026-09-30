@@ -11,7 +11,7 @@ import pandas as pd
 
 from ..blocking.blocking_pipeline import BlockingPipeline, blocking_report
 from ..blocking.pruner import CandidatePruner, cheap_features
-from ..data.data_loader import ERDataset
+from ..data.data_loader import ERDataset, dataset_kind
 from ..features.pair_features import compute_pair_features
 from ..features.record_store import RecordStore
 from ..preprocessing.normalizer import Normalizer
@@ -102,7 +102,8 @@ def prepare(ds: ERDataset, cfg: dict, use_cache: bool = True, pruner=None) -> Pr
         rep["pre_pruning"] = pre_pruning
         rep["pruner"] = getattr(pruner, "report", None)
     prep = Prepared(ds.name, ds.fingerprint(), store, cand, X, s1_ids, n_true, rep, timer.as_dict(),
-                    ds.ground_truth, {"prep_key": key, "pruner": pruner})
+                    ds.ground_truth, {"prep_key": key, "pruner": pruner,
+                                       "dataset_kind": dataset_kind(ds, resolve_path(cfg, "dataset_dir"))})
     if use_cache:
         path.parent.mkdir(parents=True, exist_ok=True)
         joblib.dump(prep, path, compress=3)

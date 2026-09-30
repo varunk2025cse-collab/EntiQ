@@ -82,7 +82,9 @@ def run_official(script: str | Path, matching: str | Path, candidate: str | Path
     script = Path(script)
     if not script.exists():
         return None
+    # --check-ids: also verify every listed ID exists in test S2/S3 (off by default in the official script)
     proc = subprocess.run([sys.executable, str(script), "--matching", str(matching), "--candidate", str(candidate),
-                           "--test-dir", str(test_dir)], capture_output=True, text=True, cwd=script.parent.parent)
+                           "--test-dir", str(test_dir), "--check-ids"], capture_output=True, text=True,
+                          cwd=script.parent.parent, encoding="utf-8", errors="replace")
     return {"exit_code": proc.returncode, "status": "PASS" if proc.returncode == 0 else "FAIL",
             "stdout": proc.stdout[-5000:], "stderr": proc.stderr[-2000:]}

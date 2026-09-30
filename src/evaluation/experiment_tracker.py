@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pandas as pd
 
-RESULT_COLUMNS = ["experiment_id", "timestamp", "suite", "name", "seed", "dataset", "dataset_fingerprint",
+RESULT_COLUMNS = ["experiment_id", "timestamp", "suite", "name", "seed", "dataset", "dataset_kind", "dataset_fingerprint",
                   "normalization", "blocking_version", "feature_set", "model", "threshold", "decision_mode",
                   "cv_f05", "cv_precision", "cv_recall", "cv_f1", "cv_singleton_accuracy",
                   "holdout_f05", "holdout_precision", "holdout_recall", "holdout_f1", "holdout_singleton_accuracy",
@@ -37,7 +37,9 @@ class ExperimentTracker:
                 (d / f"{name}.json").write_text(json.dumps(obj, indent=2, default=str))
         row = {c: record.get(c, "") for c in RESULT_COLUMNS}
         df = pd.DataFrame([row])
-        df.to_csv(self.csv, mode="a", header=not self.csv.exists(), index=False)
+        if self.csv.exists():  # reconcile schema so older files gain new columns instead of misaligning
+            df = pd.concat([pd.read_csv(self.csv), df], ignore_index=True).reindex(columns=RESULT_COLUMNS)
+        df.to_csv(self.csv, index=False)
         return exp_id
 
     def results(self) -> pd.DataFrame:

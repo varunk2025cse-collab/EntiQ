@@ -47,11 +47,33 @@ def health():
         db_ok = False
     reg = jobs.registry()
     du = shutil.disk_usage(str(settings.path("runs_dir").parent))
+    runs = explore.list_runs()
+    done = [r for r in runs if r["status"] == "COMPLETED"]
+    failed = [r for r in runs if r["status"] == "FAILED"]
+    latest = done[0] if done else None
+    kind = (latest or {}).get("summary", {}) or {}
+    kind = kind.get("dataset_kind") or explore.run_dataset_kind(latest["id"]) if latest else None
+    prod = reg.production()
+    prod_meta = {}
+    if prod:
+        try:
+            prod_meta = reg.meta(prod)
+        except Exception:
+            prod_meta = {}
+    comp_dir = settings.path("dataset_dir")
+    comp_files = {sp: sorted(p.name for p in (comp_dir / sp).glob("*.tsv")) for sp in ("train", "test") if (comp_dir / sp).exists()}
     return {"status": "ok" if db_ok else "degraded", "database": "ok" if db_ok else "error",
             "database_backend": engine.dialect.name, "uptime_s": round(time.time() - STARTED),
-            "workspace": settings.workspace or "default", "demo_mode": settings.demo_mode,
-            "production_model": reg.production(), "model_versions": len(reg.list()),
-            "latest_run": explore.latest_run_id(), "python": platform.python_version(),
+            "workspace": settings.workspace or "default",
+            # identity of the data behind what the UI shows — derived from run metadata, never assumed
+            "data_kind": kind, "demo_mode": kind == "synthetic",
+            "competition_dataset": {"path": str(comp_dir), "files": comp_files,
+                                    "complete": all(len(comp_files.get(s, [])) >= n for s, n in (("train", 4), ("test", 3)))},
+            "production_model": prod, "production_model_data_kind": prod_meta.get("dataset_kind"),
+            "production_model_name": prod_meta.get("model_name"), "model_versions": len(reg.list()),
+            "latest_run": latest["id"] if latest else None, "latest_run_finished": (latest or {}).get("finished") or (latest or {}).get("created"),
+            "last_failed_run": failed[0]["id"] if failed else None, "last_failed_error": (failed[0].get("error") or "").splitlines()[0] if failed and failed[0].get("error") else None,
+            "python": platform.python_version(),
             "platform": platform.platform(), "cpu_count": os.cpu_count(), "process_rss_mb": round(rss_mb(), 1),
             "disk_free_gb": round(du.free / 2**30, 1), "available_model_families": available_models()}
 
@@ -87,6 +109,8 @@ def dataset_profile(dataset_id: str, refresh: bool = False):
         return dsvc.profile(dataset_id, refresh)
     except KeyError as e:
         _nf(e)
+    except ValueError as e:
+        raise HTTPException(409, str(e))
 
 
 # ----------------------------------------------------------------------------- runs
@@ -214,6 +238,7 @@ def models():
         out.append({**v, "decision": m.get("decision"), "cv_metrics": m.get("cv_metrics"), "spec": m.get("spec"),
                     "feature_count": m.get("feature_count"), "feature_importance": m.get("feature_importance"),
                     "fs_weights": m.get("fs_weights"), "train_seconds": m.get("train_seconds"),
+                    "threshold_sweep": m.get("threshold_sweep"), "dataset_kind": m.get("dataset_kind"),
                     "blocking_report": m.get("blocking_report")})
     return {"production": reg.production(), "versions": out, "available_families": available_models()}
 

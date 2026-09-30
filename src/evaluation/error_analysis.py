@@ -72,7 +72,8 @@ def analyse_errors(prep, view, p: np.ndarray, selected: np.ndarray, threshold: f
                 if (s1, m) not in found and m in id_row:
                     i, j = id_row[s1], id_row[m]
                     rows.append({"error_type": "FALSE_NEGATIVE", "category": "blocking_failure", "tags": ["blocking_failure"],
-                                 "s1_id": s1, "other_id": m, "p": None, **_texts(rec, i, j)})
+                                 "s1_id": s1, "other_id": m, "p": None, "threshold": threshold, "ground_truth": "same business",
+                                 "prediction": "never retrieved", "reason_codes": [], **_texts(rec, i, j)})
     errs = pd.DataFrame(rows)
     summary = {"false_positives": int((errs.error_type == "FALSE_POSITIVE").sum()) if len(errs) else 0,
                "false_negatives": int((errs.error_type == "FALSE_NEGATIVE").sum()) if len(errs) else 0,
@@ -90,8 +91,13 @@ def _texts(rec: pd.DataFrame, i: int, j: int) -> dict:
 
 
 def _row(kind: str, r: dict, cat: str, tags: list[str], rec: pd.DataFrame) -> dict:
+    from ..matching.decision_engine import reason_codes
+
     out = {"error_type": kind, "category": cat, "tags": tags, "s1_id": r["s1_id"], "other_id": r["other_id"],
-           "p": round(float(r["p"]), 4)}
+           "p": round(float(r["p"]), 4), "threshold": round(float(r["threshold"]), 4),
+           "ground_truth": "same business" if kind == "FALSE_NEGATIVE" else "different businesses",
+           "prediction": "match" if kind == "FALSE_POSITIVE" else "no match",
+           "reason_codes": reason_codes({k: v for k, v in r.items() if isinstance(v, (int, float))})}
     out.update({k: round(float(r[k]), 4) for k in KEY_FEATURES if k in r})
     out.update(_texts(rec, int(r["i"]), int(r["j"])))
     return out

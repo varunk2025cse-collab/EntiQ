@@ -72,7 +72,7 @@ def _execute_run(run_id: str, root: str, split: str, version: str) -> None:
 
 
 def _light(summary: dict) -> dict:
-    keep = ("run_id", "dataset", "model_name", "model_version", "decision", "counts", "metrics", "validation",
+    keep = ("run_id", "dataset", "dataset_kind", "model_name", "model_version", "decision", "counts", "metrics", "validation",
             "timings", "dataset_fingerprint", "metrics_note")
     return {k: summary.get(k) for k in keep}
 

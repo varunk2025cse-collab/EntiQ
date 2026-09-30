@@ -26,6 +26,8 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from .indic import transliterate
+
 # Legal-form variants -> canonical token. Multi-word variants are matched first.
 LEGAL_PHRASES = {
     "private limited": "pvt ltd", "pvt limited": "pvt ltd", "p ltd": "pvt ltd", "pvt ltd": "pvt ltd",
@@ -40,6 +42,9 @@ LEGAL_TOKENS = {
     "lp": "lp", "gmbh": "gmbh", "ag": "ag", "bv": "bv", "nv": "nv", "sarl": "sarl", "sas": "sas", "sasu": "sasu",
     "eurl": "eurl", "sa": "sa", "sci": "sci", "snc": "snc", "pte": "pte", "pty": "pty", "srl": "srl", "spa": "spa",
     "cie": "co", "ltda": "ltda", "oy": "oy", "ab": "ab", "kk": "kk", "bhd": "bhd", "sdn": "sdn",
+    # transliterated legal words seen in Indic-script names (after src.preprocessing.indic)
+    "praivet": "pvt", "praibhet": "pvt", "privet": "pvt", "praivhet": "pvt", "limitad": "ltd", "limitid": "ltd",
+    "elaelapi": "llp", "elelpi": "llp", "elaelasi": "llc", "kampani": "co", "korporeshan": "corp",
 }
 LEGAL_CANON = set(LEGAL_TOKENS.values()) | {"sons", "fils", "et"}
 NAME_STOP = {"the", "and", "of", "de", "la", "le", "les", "du", "des", "d", "l", "et", "a"}
@@ -73,13 +78,22 @@ ADDR_ABBR = {
     "gurugram": "gurgaon", "trivandrum": "thiruvananthapuram", "bis": "b",
 }
 LANDMARK_MARKERS = {"nr", "opp", "bhd", "bsd"}
-ADDR_NOISE = {"no", "door", "house", "flat", "plot", "the"}
+ADDR_NOISE = {"no", "door", "house", "flat", "plot", "the", "null", "none", "na", "nan", "unit"}
+# ordinal words -> numbers ("Fifth Street" == "5th Street"; "Twenty First" == "21st")
+ORDINAL_WORDS = {"first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5, "sixth": 6, "seventh": 7, "eighth": 8,
+                 "ninth": 9, "tenth": 10, "eleventh": 11, "twelfth": 12, "thirteenth": 13, "fourteenth": 14,
+                 "fifteenth": 15, "sixteenth": 16, "seventeenth": 17, "eighteenth": 18, "nineteenth": 19,
+                 "twentieth": 20, "thirtieth": 30, "fortieth": 40, "fiftieth": 50, "sixtieth": 60, "seventieth": 70,
+                 "eightieth": 80, "ninetieth": 90, "hundredth": 100}
+TENS_WORDS = {"twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90}
+DOMAIN_RE = re.compile(r"^(?:https?://)?(?:www\.)?([a-z0-9][a-z0-9-]*)\.(?:com|net|org|in|co|co\.in|io|biz|info|us|fr)$", re.I)
 ORDINAL_RE = re.compile(r"\b(\d+)(st|nd|rd|th|er|e|eme|ème)\b")
 NUM_RE = re.compile(r"\d+")
 DIGIT_ALPHA_RE = re.compile(r"\b(\d+)([a-z]+)\b")
 POSTAL_RE = re.compile(r"\b\d{5,6}\b")
 INITIALS_RE = re.compile(r"\b(?:[a-z]\s*\.\s*){2,}")
-DBA_RE = re.compile(r"\s+(?:d\s*/?\s*b\s*/?\s*a|doing business as|t\s*/\s*a|trading as|aka|a\s*/\s*k\s*/\s*a)\s+", re.I)
+DBA_RE = re.compile(r"\s+(?:d\s*/?\s*b\s*/?\s*a|doing business as|t\s*/\s*a|trading as|aka|a\s*/\s*k\s*/\s*a|"
+                    r"formerly(?:\s+known\s+as)?|f\s*/?\s*k\s*/?\s*a|previously|now known as)\s*[:\-]?\s+", re.I)
 PAREN_RE = re.compile(r"\(([^)]*)\)")
 NONWORD_RE = re.compile(r"[^0-9a-z]+")
 SPACE_RE = re.compile(r"\s+")
@@ -98,6 +112,7 @@ def strip_accents(s: str) -> str:
 
 def basic_clean(s: str, accents: bool = True) -> str:
     s = unicodedata.normalize("NFKC", s or "")
+    s = transliterate(s)  # Indic scripts -> Latin (no-op for other text)
     if accents:
         s = strip_accents(s)
     s = s.lower().replace("&", " and ").replace("@", " at ")
@@ -174,6 +189,9 @@ class Normalizer:
         return raw, ""
 
     def name(self, raw: str) -> dict:
+        dm = DOMAIN_RE.match((raw or "").strip())
+        if dm:  # "wilfordhancock.com" / "www.x.in" used as a business name -> its label
+            raw = dm.group(1).replace("-", " ")
         main_raw, alt_raw = self.split_trade_name(raw)
         norm = self._name_norm(main_raw)
         core = self._name_core(norm)
@@ -212,8 +230,19 @@ class Normalizer:
         s = ORDINAL_RE.sub(r"\1", s)
         s = DIGIT_ALPHA_RE.sub(r"\1 \2", s)  # 12bis -> 12 bis, 4b -> 4 b
         toks: list[str] = []
-        for t in s.split():
-            toks.extend(ADDR_ABBR.get(t, t).split())
+        words = s.split()
+        k = 0
+        while k < len(words):  # ordinal words -> numbers: "fifth" -> 5, "twenty first" -> 21
+            t = words[k]
+            if t in TENS_WORDS and k + 1 < len(words) and words[k + 1] in ORDINAL_WORDS and ORDINAL_WORDS[words[k + 1]] < 10:
+                toks.append(str(TENS_WORDS[t] + ORDINAL_WORDS[words[k + 1]]))
+                k += 2
+                continue
+            if t in ORDINAL_WORDS:
+                toks.append(str(ORDINAL_WORDS[t]))
+            else:
+                toks.extend(ADDR_ABBR.get(t, t).split())
+            k += 1
         return toks
 
     def address(self, raw: str) -> dict:

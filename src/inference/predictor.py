@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 from ..data.data_loader import ERDataset
+from ..data.data_loader import dataset_kind
 from ..data.data_validator import validate_dataset
 from ..evaluation.error_analysis import analyse_errors
 from ..evaluation.metrics import evaluate_selection
@@ -140,6 +141,8 @@ def resolve(ds: ERDataset, bundle: dict, cfg: dict, run_id: str | None = None, m
         summary = {
             "run_id": run_id, "created": time.strftime("%Y-%m-%dT%H:%M:%S"), "status": "COMPLETED",
             "dataset": ds.name, "dataset_fingerprint": prep.fingerprint, "model_version": model_version,
+            "dataset_kind": dataset_kind(ds, resolve_path(cfg, "dataset_dir")),
+            "dataset_root": str(Path(ds.files.get("source1", "")).parent.parent.name) if ds.files else None,
             "model_name": bundle["spec"]["name"], "decision": prm.as_dict(),
             "counts": {"s1": n_s1, "s2": len(ds.s2), "s3": len(ds.s3), "candidates": int(len(cand)),
                        "links": int(sel.sum()), "s2_links": int((sel & (cand["target"] == "S2").to_numpy()).sum()),

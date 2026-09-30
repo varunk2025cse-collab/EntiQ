@@ -10,3 +10,5 @@ output/
 experiments/
 *_submission.zip
 configs/selected.yaml
+_download/
+student_resource/
